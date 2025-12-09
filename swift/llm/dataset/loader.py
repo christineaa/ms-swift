@@ -207,6 +207,9 @@ class DatasetLoader:
     ) -> HfDataset:
         ext = os.path.splitext(dataset_path)[1].lstrip('.')
         file_type = {'jsonl': 'json', 'txt': 'text'}.get(ext) or ext
+        # Handle files without extension - default to json format
+        if not file_type:
+            file_type = 'json'
         kwargs = {'split': 'train', 'streaming': streaming, 'num_proc': num_proc}
         if file_type == 'csv':
             kwargs['na_filter'] = False
