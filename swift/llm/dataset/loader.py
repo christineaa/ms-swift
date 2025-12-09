@@ -194,6 +194,74 @@ class DatasetLoader:
         return interleave_datasets(datasets, *args, **kwargs)
 
     @staticmethod
+    def _merge_file_paths(datasets: List[str]) -> List[str]:
+        """Merge multiple file paths from the same directory into a single dataset entry.
+
+        This allows Hugging Face datasets to load them as multiple shards of one dataset,
+        enabling proper multiprocessing instead of loading each file separately.
+
+        Args:
+            datasets: List of dataset paths or IDs
+
+        Returns:
+            Merged list where consecutive file paths from the same directory are combined
+        """
+        import glob
+        from collections import defaultdict
+
+        # Group consecutive file paths by directory
+        merged = []
+        file_groups = defaultdict(list)
+        current_dir = None
+
+        for dataset in datasets:
+            # Check if it's a file path (contains / and exists or has extension)
+            is_file_path = ('/' in dataset or '\\' in dataset) and (
+                os.path.exists(dataset) or
+                any(dataset.endswith(ext) for ext in ['.json', '.jsonl', '.csv', '.txt'])
+            )
+
+            if is_file_path:
+                dir_path = os.path.dirname(os.path.abspath(dataset))
+                if current_dir is None:
+                    current_dir = dir_path
+
+                if dir_path == current_dir:
+                    # Same directory, add to current group
+                    file_groups[current_dir].append(dataset)
+                else:
+                    # Different directory, flush current group and start new one
+                    if file_groups[current_dir]:
+                        if len(file_groups[current_dir]) > 1:
+                            # Multiple files, merge them
+                            merged.append(file_groups[current_dir])
+                        else:
+                            # Single file, keep as is
+                            merged.append(file_groups[current_dir][0])
+                        file_groups.clear()
+                    current_dir = dir_path
+                    file_groups[current_dir].append(dataset)
+            else:
+                # Not a file path (dataset ID), flush any pending files and add this
+                if current_dir and file_groups[current_dir]:
+                    if len(file_groups[current_dir]) > 1:
+                        merged.append(file_groups[current_dir])
+                    else:
+                        merged.append(file_groups[current_dir][0])
+                    file_groups.clear()
+                    current_dir = None
+                merged.append(dataset)
+
+        # Flush any remaining files
+        if current_dir and file_groups[current_dir]:
+            if len(file_groups[current_dir]) > 1:
+                merged.append(file_groups[current_dir])
+            else:
+                merged.append(file_groups[current_dir][0])
+
+        return merged
+
+    @staticmethod
     def _load_json_with_columns(dataset_path: str, keep_columns: List[str]) -> HfDataset:
         """Load JSON/JSONL file and only keep specified columns to avoid schema conflicts."""
         import json
@@ -222,7 +290,7 @@ class DatasetLoader:
 
     @staticmethod
     def _load_dataset_path(
-        dataset_path: str,
+        dataset_path: Union[str, List[str]],
         dataset_meta: DatasetMeta,
         *,
         num_proc: int = 1,
@@ -233,22 +301,54 @@ class DatasetLoader:
         remove_unused_columns: bool = True,
         keep_columns: Optional[List[str]] = None,
     ) -> HfDataset:
-        ext = os.path.splitext(dataset_path)[1].lstrip('.')
+        logger = get_logger()
+
+        # Handle list of file paths or single path (file or directory)
+        is_file_list = isinstance(dataset_path, list)
+        is_directory = isinstance(dataset_path, str) and os.path.isdir(dataset_path)
+        is_single_file = isinstance(dataset_path, str) and os.path.isfile(dataset_path)
+
+        first_path = dataset_path[0] if is_file_list else dataset_path
+        ext = os.path.splitext(first_path)[1].lstrip('.')
         file_type = {'jsonl': 'json', 'txt': 'text'}.get(ext) or ext
 
         # Auto-adjust num_proc if only one data file to avoid multiprocessing warning
-        if num_proc > 1 and isinstance(dataset_path, str) and os.path.isfile(dataset_path):
-            logger = get_logger()
+        if num_proc > 1 and is_single_file:
             logger.info(f'Setting num_proc from {num_proc} to 1 as the dataset contains only a single file. '
                        f'Multiprocessing is only beneficial with multiple data files.')
             num_proc = 1
+        elif is_directory:
+            logger.info(f'Loading dataset from directory: {dataset_path}. '
+                       f'All matching files will be loaded as multiple shards.')
+        elif is_file_list:
+            logger.info(f'Loading dataset from {len(dataset_path)} files as multiple shards.')
 
         # If keep_columns is specified for JSON files, use custom loading to avoid schema issues
         if keep_columns and file_type == 'json' and not streaming:
-            logger = get_logger()
             logger.info(f'Loading dataset with keep_columns={keep_columns}. '
                        f'Only these columns will be kept, avoiding potential schema conflicts.')
-            dataset = DatasetLoader._load_json_with_columns(dataset_path, keep_columns)
+            if is_file_list:
+                # Load multiple files with keep_columns
+                datasets_list = []
+                for path in dataset_path:
+                    ds = DatasetLoader._load_json_with_columns(path, keep_columns)
+                    datasets_list.append(ds)
+                dataset = concatenate_datasets(datasets_list)
+            elif is_directory:
+                # Load all JSON files from directory with keep_columns
+                import glob
+                json_files = sorted(glob.glob(os.path.join(dataset_path, '*.json')) +
+                                  glob.glob(os.path.join(dataset_path, '*.jsonl')))
+                if not json_files:
+                    raise ValueError(f'No JSON/JSONL files found in directory: {dataset_path}')
+                logger.info(f'Found {len(json_files)} JSON/JSONL files in directory.')
+                datasets_list = []
+                for path in json_files:
+                    ds = DatasetLoader._load_json_with_columns(path, keep_columns)
+                    datasets_list.append(ds)
+                dataset = concatenate_datasets(datasets_list)
+            else:
+                dataset = DatasetLoader._load_json_with_columns(dataset_path, keep_columns)
         else:
             kwargs = {'split': 'train', 'streaming': streaming, 'num_proc': num_proc}
             if file_type == 'csv':
@@ -549,6 +649,11 @@ def load_dataset(
     init_self_cognition_preprocessor(DATASET_MAPPING.get('self-cognition'), model_name, model_author)
     if isinstance(datasets, str):
         datasets = [datasets]
+
+    # Merge multiple file paths from the same directory into a single dataset
+    # This allows proper multi-shard loading and better multiprocessing
+    datasets = DatasetLoader._merge_file_paths(datasets)
+
     if not isinstance(seed, np.random.RandomState):
         seed = np.random.RandomState(seed)
     if streaming:
