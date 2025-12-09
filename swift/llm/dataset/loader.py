@@ -194,6 +194,33 @@ class DatasetLoader:
         return interleave_datasets(datasets, *args, **kwargs)
 
     @staticmethod
+    def _load_json_with_columns(dataset_path: str, keep_columns: List[str]) -> HfDataset:
+        """Load JSON/JSONL file and only keep specified columns to avoid schema conflicts."""
+        import json
+
+        data = []
+        with open(dataset_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                    # Only keep specified columns
+                    filtered_item = {col: item[col] for col in keep_columns if col in item}
+                    data.append(filtered_item)
+                except json.JSONDecodeError as e:
+                    logger = get_logger()
+                    logger.warning(f'Failed to parse JSON line: {line[:100]}... Error: {e}')
+                    continue
+                except KeyError as e:
+                    logger = get_logger()
+                    logger.warning(f'Missing column {e} in line: {line[:100]}...')
+                    continue
+
+        return HfDataset.from_list(data)
+
+    @staticmethod
     def _load_dataset_path(
         dataset_path: str,
         dataset_meta: DatasetMeta,
@@ -204,6 +231,7 @@ class DatasetLoader:
         streaming: bool = False,
         columns: Optional[Dict[str, str]] = None,
         remove_unused_columns: bool = True,
+        keep_columns: Optional[List[str]] = None,
     ) -> HfDataset:
         ext = os.path.splitext(dataset_path)[1].lstrip('.')
         file_type = {'jsonl': 'json', 'txt': 'text'}.get(ext) or ext
@@ -215,12 +243,19 @@ class DatasetLoader:
                        f'Multiprocessing is only beneficial with multiple data files.')
             num_proc = 1
 
-        kwargs = {'split': 'train', 'streaming': streaming, 'num_proc': num_proc}
-        if file_type == 'csv':
-            kwargs['na_filter'] = False
-        with safe_ddp_context(None, True):
-            kwargs['cache_dir'] = os.path.join(get_cache_dir(), 'datasets')
-            dataset = hf_load_dataset(file_type, data_files=dataset_path, **kwargs)
+        # If keep_columns is specified for JSON files, use custom loading to avoid schema issues
+        if keep_columns and file_type == 'json' and not streaming:
+            logger = get_logger()
+            logger.info(f'Loading dataset with keep_columns={keep_columns}. '
+                       f'Only these columns will be kept, avoiding potential schema conflicts.')
+            dataset = DatasetLoader._load_json_with_columns(dataset_path, keep_columns)
+        else:
+            kwargs = {'split': 'train', 'streaming': streaming, 'num_proc': num_proc}
+            if file_type == 'csv':
+                kwargs['na_filter'] = False
+            with safe_ddp_context(None, True):
+                kwargs['cache_dir'] = os.path.join(get_cache_dir(), 'datasets')
+                dataset = hf_load_dataset(file_type, data_files=dataset_path, **kwargs)
         if columns:
             dataset = RowPreprocessor.safe_rename_columns(dataset, columns)
         dataset = dataset_meta.preprocess_func(
@@ -399,6 +434,7 @@ class DatasetLoader:
         download_mode: Literal['force_redownload', 'reuse_dataset_if_exists'] = 'reuse_dataset_if_exists',
         columns: Optional[Dict[str, str]] = None,
         remove_unused_columns: bool = True,
+        keep_columns: Optional[List[str]] = None,
     ) -> HfDataset:
         if dataset_syntax.dataset_type == 'path':
             dataset = DatasetLoader._load_dataset_path(
@@ -410,6 +446,7 @@ class DatasetLoader:
                 streaming=streaming,
                 columns=columns,
                 remove_unused_columns=remove_unused_columns,
+                keep_columns=keep_columns,
             )
         else:
             subsets: List[SubsetDataset] = DatasetLoader._select_subsets(dataset_syntax.subsets, dataset_meta)
@@ -480,6 +517,7 @@ def load_dataset(
     download_mode: Literal['force_redownload', 'reuse_dataset_if_exists'] = 'reuse_dataset_if_exists',
     columns: Optional[Dict[str, str]] = None,  # columns_mapping
     remove_unused_columns: bool = True,
+    keep_columns: Optional[List[str]] = None,  # Only keep specified columns (for avoiding schema conflicts)
     # self-cognition
     model_name: Optional[Union[Tuple[str, str], List[str]]] = None,  # zh, en
     model_author: Optional[Union[Tuple[str, str], List[str]]] = None,
@@ -499,6 +537,9 @@ def load_dataset(
         strict: Raise if any row is not correct.
         download_mode: Download mode, default is `reuse_dataset_if_exists`.
         columns: Used for manual column mapping of datasets.
+        keep_columns: Only keep specified columns when loading JSON/JSONL files.
+            This can avoid schema conflicts caused by inconsistent data types in other columns.
+            Example: keep_columns=['messages'] will only load the 'messages' field.
 
         model_name: Model name in self-cognition task.
         model_author: Model author in self-cognition task
@@ -523,6 +564,7 @@ def load_dataset(
         'streaming': streaming,
         'hub_token': hub_token,
         'remove_unused_columns': remove_unused_columns,
+        'keep_columns': keep_columns,
     }
     use_hf_default = use_hf
     if use_hf_default is None:

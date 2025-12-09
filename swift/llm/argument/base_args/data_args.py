@@ -62,6 +62,9 @@ class DataArguments:
         remove_unused_columns (bool): Whether to remove columns not used by the model. If `False`, extra columns are
             passed to the trainer's `compute_loss` function, which is useful for custom loss calculations.
             Defaults to True. Note: The default is `False` for GPRO.
+        keep_columns (Optional[List[str]]): If specified, only these columns will be kept when loading JSON/JSONL
+            files. This can avoid schema conflicts caused by inconsistent data types in other columns.
+            Example: `--keep_columns messages` will only load the 'messages' field. Defaults to None.
         model_name (Optional[List[str]]): For self-cognition tasks, replaces the `{{NAME}}` placeholder in the
             `swift/self-cognition` dataset. Pass Chinese and English names.
             Example: `--model_name 小黄 'Xiao Huang'`. Defaults to None.
@@ -91,6 +94,7 @@ class DataArguments:
     columns: Optional[Union[dict, str]] = None
     strict: bool = False
     remove_unused_columns: bool = True
+    keep_columns: Optional[List[str]] = None
     # Chinese name and English name
     model_name: Optional[List[str]] = field(default=None, metadata={'help': "e.g. ['小黄', 'Xiao Huang']"})
     model_author: Optional[List[str]] = field(default=None, metadata={'help': "e.g. ['魔搭', 'ModelScope']"})
@@ -139,4 +143,5 @@ class DataArguments:
             'model_name': self.model_name,
             'model_author': self.model_author,
             'remove_unused_columns': self.remove_unused_columns,
+            'keep_columns': self.keep_columns,
         }
