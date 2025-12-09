@@ -207,6 +207,14 @@ class DatasetLoader:
     ) -> HfDataset:
         ext = os.path.splitext(dataset_path)[1].lstrip('.')
         file_type = {'jsonl': 'json', 'txt': 'text'}.get(ext) or ext
+
+        # Auto-adjust num_proc if only one data file to avoid multiprocessing warning
+        if num_proc > 1 and isinstance(dataset_path, str) and os.path.isfile(dataset_path):
+            logger = get_logger()
+            logger.info(f'Setting num_proc from {num_proc} to 1 as the dataset contains only a single file. '
+                       f'Multiprocessing is only beneficial with multiple data files.')
+            num_proc = 1
+
         kwargs = {'split': 'train', 'streaming': streaming, 'num_proc': num_proc}
         if file_type == 'csv':
             kwargs['na_filter'] = False
