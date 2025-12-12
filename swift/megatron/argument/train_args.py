@@ -36,6 +36,9 @@ class MegatronTrainArguments(MegatronBaseArguments):
             with open(args_path, 'r', encoding='utf-8') as f:
                 old_args = json.load(f)
             self.model = old_args.get('model')
+            if self.model_type is None:
+                self.model_type = old_args.get('model_type')
+            logger.info(f'Loaded from checkpoint args.json: model={self.model}, model_type={self.model_type}')
 
     def __post_init__(self):
         self.load = to_abspath(self.load, check_path_exist=True)
