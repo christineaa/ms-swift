@@ -21,6 +21,10 @@ NPROC_PER_NODE=8  # 每个节点的GPU数量
 MASTER_ADDR="10.0.0.1"  # 主节点IP，修改这里！
 MASTER_PORT=29500  # 主节点端口
 
+# 注意力后端配置
+# 如果遇到 "No dot product attention backend is available" 错误
+# 使用 --attention_backend local 来使用原生 Megatron 注意力实现
+
 # ============================================================
 # 启用详细错误日志
 # ============================================================
@@ -111,6 +115,7 @@ megatron sft \
     $DATASET_ARGS \
     --no_load_optim true \
     --no_load_rng false \
+    --attention_backend local \
     --tensor_model_parallel_size 2 \
     --sequence_parallel true \
     --micro_batch_size 16 \
